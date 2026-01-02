@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Split-Flap (2 lignes)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#0b0b0b; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { min-height: 100%; display:flex; align-items:center; justify-content:center; padding: 24px; }
+    .card {
+      background: #0f0f0f;
+      border: 1px solid #1f1f1f;
+      border-radius: 18px;
+      padding: 18px 18px 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      max-width: 1100px;
+      width: 100%;
+    }
+    .title { display:flex; justify-content:space-between; align-items:baseline; gap:16px; padding: 4px 6px 10px; }
+    .title h1 { font-size: 14px; margin: 0; opacity:.85; letter-spacing:.08em; text-transform: uppercase; }
+    .title .hint { font-size: 12px; opacity:.65; }
+    canvas { width: 100%; height: auto; display:block; border-radius: 14px; background: #0b0b0b; }
+    .footer { display:flex; gap:10px; align-items:center; padding: 10px 6px 2px; opacity:.72; font-size: 12px; flex-wrap: wrap; }
+    .pill { border:1px solid #232323; border-radius: 999px; padding: 4px 10px; background:#111; }
+    a { color:#9ad; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="title">
+      <h1>Split-Flap (double volet)</h1>
+      <div class="hint">Clique dans la page pour activer le son (les navigateurs bloquent l’audio auto).</div>
+    </div>
+    <canvas id="board"></canvas>
+    <div class="footer">
+      <span class="pill">2 lignes · Canvas</span>
+      <span class="pill">Rendu réaliste · double volet</span>
+      <span class="pill">Son “clic” (WebAudio)</span>
+      <span class="pill">Tu changes les mots dans le code</span>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ============================
+  // 1) CONFIG — change tes mots ici
+  // ============================
+  const LINE1 = "GARE";
+  const LINE2 = "PARIS";
+
+  // Alphabet “roue” (adapte si tu veux chiffres, tiret, etc.)
+  const ALPHABET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./";
+
+  // Réglages visuels / anim
+  const CELL_W = 72;      // largeur cellule (px)
+  const CELL_H = 92;      // hauteur cellule (px)
+  const GAP_X  = 8;       // espace entre cellules
+  const GAP_Y  = 16;      // espace entre lignes
+  const PAD    = 18;      // marge autour
+
+  const FLIP_FRAMES = 10;     // fluidité du flip (plus haut = plus fluide)
+  const FRAME_MS    = 18;     // vitesse des frames du flip
+  const STEP_MS     = 55;     // délai entre deux “pas” de roue (lettre suivante)
+
+  // Couleurs
+  const BG      = "#0b0b0b";
+  const CELL_BG = "#111111";
+  const SHADOW  = "rgba(0,0,0,.55)";
+  const DIVIDER = "#2a2a2a";
+  const TEXT    = "#ffffff";
+  const EDGE    = "#1c1c1c";
+
+  // Police (monospace conseillée)
+  const FONT_FAMILY = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace";
+  const FONT_SIZE   = 52;  // taille de la lettre dans la cellule
+
+  // ============================
+  // 2) AUDIO — clic portable (WebAudio)
+  // ============================
+  let audioCtx = null;
+  let audioEnabled = false;
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    audioEnabled = true;
+  }
+
+  function clickSound() {
+    if (!audioEnabled || !audioCtx) return;
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    // Petit "clic" sec : pitch haut, durée très courte, enveloppe rapide
+    osc.type = "square";
+    osc.frequency.setValueAtTime(1800, t);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.12, t + 0.002);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.035);
+  }
+
+  // Activer audio au premier clic/tap (politique navigateur)
+  window.addEventListener("pointerdown", ensureAudio, { once: true });
+
+  // ============================
+  // 3) Canvas setup + DPR
+  // ============================
+  const canvas = document.getElementById("board");
+  const ctx = canvas.getContext("2d");
+
+  function dpr() { return Math.max(1, Math.min(2.5, window.devicePixelRatio || 1)); }
+
+  function resizeCanvas() {
+    const cols = Math.max(LINE1.length, LINE2.length);
+    const w = PAD*2 + cols*CELL_W + (cols-1)*GAP_X;
+    const h = PAD*2 + 2*CELL_H + GAP_Y;
+
+    const ratio = dpr();
+    canvas.width  = Math.floor(w * ratio);
+    canvas.height = Math.floor(h * ratio);
+    canvas.style.height = "auto";
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    draw(); // redraw
+  }
+
+  // ============================
+  // 4) Split-flap cell rendering (vrai double volet via “clipping”)
+  // ============================
+  function roundRect(c, x, y, w, h, r) {
+    const rr = Math.min(r, w/2, h/2);
+    c.beginPath();
+    c.moveTo(x+rr, y);
+    c.arcTo(x+w, y, x+w, y+h, rr);
+    c.arcTo(x+w, y+h, x, y+h, rr);
+    c.arcTo(x, y+h, x, y, rr);
+    c.arcTo(x, y, x+w, y, rr);
+    c.closePath();
+  }
+
+  function drawCellBackground(x, y) {
+    // ombre
+    ctx.save();
+    ctx.shadowColor = SHADOW;
+    ctx.shadowBlur = 14;
+    ctx.shadowOffsetY = 8;
+
+    roundRect(ctx, x, y, CELL_W, CELL_H, 12);
+    ctx.fillStyle = CELL_BG;
+    ctx.fill();
+    ctx.restore();
+
+    // bord
+    ctx.save();
+    roundRect(ctx, x, y, CELL_W, CELL_H, 12);
+    ctx.strokeStyle = EDGE;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+
+    // charnière
+    ctx.save();
+    ctx.strokeStyle = DIVIDER;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, y + CELL_H/2);
+    ctx.lineTo(x + CELL_W, y + CELL_H/2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawCharHalf(char, x, y, half, clipAmount01) {
+    // half: "top" ou "bottom"
+    // clipAmount01: 0..1 représente la partie masquée qui “mange” le volet
+    ctx.save();
+    ctx.font = `700 ${FONT_SIZE}px ${FONT_FAMILY}`;
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const cx = x + CELL_W/2;
+    const cy = y + CELL_H/2;
+
+    // zone du demi-volet
+    const hh = CELL_H/2;
+    const topY = y;
+    const botY = y + hh;
+
+    if (half === "top") {
+      // On coupe sur la moitié haute, puis on masque progressivement de haut en bas
+      const maskH = hh * clipAmount01; // hauteur masquée
+      ctx.beginPath();
+      ctx.rect(x, topY + maskH, CELL_W, hh - maskH);
+      ctx.clip();
+      // on dessine la lettre complète, mais elle est “clippée”
+      ctx.fillText(char, cx, cy + 2); // petit ajustement visuel
+    } else {
+      // moitié basse, masque remonte du bas vers le centre
+      const maskH = hh * clipAmount01;
+      ctx.beginPath();
+      ctx.rect(x, botY, CELL_W, hh - maskH);
+      ctx.clip();
+      ctx.fillText(char, cx, cy + 2);
+    }
+
+    ctx.restore();
+  }
+
+  // ============================
+  // 5) Modèle / animation
+  // ============================
+  const cols = Math.max(LINE1.length, LINE2.length);
+
+  function padToCols(s) {
+    return (s || "").toUpperCase().padEnd(cols, " ").slice(0, cols);
+  }
+
+  const target1 = padToCols(LINE1);
+  const target2 = padToCols(LINE2);
+
+  // État courant : chars + animation par cellule
+  const state = [];
+  for (let r = 0; r < 2; r++) {
+    state[r] = [];
+    for (let c = 0; c < cols; c++) {
+      state[r][c] = {
+        cur: " ",
+        // flip animation (0..1) pour top/bottom
+        flipping: false,
+        phase: "idle", // "closingTop" -> "openingBottom"
+        frame: 0,
+        nextChar: " "
+      };
+    }
+  }
+
+  // File d’animation : on avance cellule par cellule (colonne puis ligne)
+  let animQueue = [];
+  function buildQueue() {
+    animQueue = [];
+    for (let r = 0; r < 2; r++) {
+      for (let c = 0; c < cols; c++) {
+        animQueue.push([r, c]);
+      }
+    }
+  }
+
+  function nextInAlphabet(ch) {
+    const i = ALPHABET.indexOf(ch);
+    if (i === -1) return ALPHABET[0];
+    return ALPHABET[(i + 1) % ALPHABET.length];
+  }
+
+  function cellTarget(r, c) {
+    return (r === 0 ? target1[c] : target2[c]) || " ";
+  }
+
+  function startFlip(r, c, toChar) {
+    const cell = state[r][c];
+    cell.flipping = true;
+    cell.phase = "closingTop";
+    cell.frame = 0;
+    cell.nextChar = toChar;
+  }
+
+  function tickFlip(r, c) {
+    const cell = state[r][c];
+    if (!cell.flipping) return false;
+
+    cell.frame++;
+
+    if (cell.phase === "closingTop") {
+      if (cell.frame >= FLIP_FRAMES) {
+        // bascule réelle (clic) + changement de lettre
+        clickSound();
+        cell.cur = cell.nextChar;
+        cell.phase = "openingBottom";
+        cell.frame = 0;
+      }
+    } else if (cell.phase === "openingBottom") {
+      if (cell.frame >= FLIP_FRAMES) {
+        cell.flipping = false;
+        cell.phase = "idle";
+        cell.frame = 0;
+      }
+    }
+    return true;
+  }
+
+  // Étape "roue" : tant que cur != target, on flip vers la lettre suivante
+  let running = false;
+
+  function stepWheelForCell(r, c, doneCb) {
+    const cell = state[r][c];
+    const tgt = cellTarget(r, c);
+
+    if (cell.cur === tgt) { doneCb(); return; }
+
+    // si alphabet ne contient pas la cible, on tombera dessus jamais :
+    // (on force alors la cible directement en 1 flip)
+    if (!ALPHABET.includes(tgt)) {
+      startFlip(r, c, tgt);
+      waitFlipDone(r, c, doneCb);
+      return;
+    }
+
+    const next = nextInAlphabet(cell.cur);
+    startFlip(r, c, next);
+    waitFlipDone(r, c, () => {
+      // délai entre deux "pas" (lettres) pour cette cellule
+      setTimeout(() => stepWheelForCell(r, c, doneCb), STEP_MS);
+    });
+  }
+
+  function waitFlipDone(r, c, cb) {
+    const check = () => {
+      if (!state[r][c].flipping) cb();
+      else requestAnimationFrame(check);
+    };
+    check();
+  }
+
+  function runSequence() {
+    if (running) return;
+    running = true;
+    buildQueue();
+
+    const nextCell = () => {
+      const item = animQueue.shift();
+      if (!item) { running = false; return; }
+      const [r, c] = item;
+
+      stepWheelForCell(r, c, nextCell);
+    };
+
+    nextCell();
+  }
+
+  // ============================
+  // 6) Render loop
+  // ============================
+  function draw() {
+    // fond
+    ctx.save();
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    for (let r = 0; r < 2; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = PAD + c*(CELL_W + GAP_X);
+        const y = PAD + r*(CELL_H + GAP_Y);
+
+        drawCellBackground(x, y);
+
+        const cell = state[r][c];
+        const ch = cell.cur;
+
+        // Calcul de l'avancement du flip
+        // - top: clipAmount augmente 0..1 pendant closingTop, sinon 0
+        // - bottom: clipAmount diminue 1..0 pendant openingBottom, sinon 0
+        let topClip = 0;
+        let botClip = 0;
+
+        if (cell.flipping && cell.phase === "closingTop") {
+          topClip = Math.min(1, cell.frame / FLIP_FRAMES);
+          botClip = 0;
+        } else if (cell.flipping && cell.phase === "openingBottom") {
+          topClip = 0;
+          // ici on veut "masquer" au début, puis dévoiler : clipAmount = 1 - progress
+          const p = Math.min(1, cell.frame / FLIP_FRAMES);
+          botClip = 1 - p;
+        }
+
+        // Dessin des demi-volets (avec clipping)
+        drawCharHalf(ch, x, y, "top", topClip);
+        drawCharHalf(ch, x, y, "bottom", botClip);
+      }
+    }
+
+    // petit texte discret
+    ctx.save();
+    ctx.font = `600 12px ${FONT_FAMILY}`;
+    ctx.fillStyle = "rgba(255,255,255,.45)";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText("Split-Flap • change LINE1/LINE2 dans le code", 18, (PAD*2 + 2*CELL_H + GAP_Y + 18));
+    ctx.restore();
+  }
+
+  function animateLoop() {
+    // met à jour les flips
+    let any = false;
+    for (let r = 0; r < 2; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (state[r][c].flipping) {
+          // On avance en fonction du temps (simple : 1 frame par FRAME_MS)
+          // Ici on laisse requestAnimationFrame + un petit throttling
+          // => on gère le throttling via un timestamp global
+          any = true;
+        }
+      }
+    }
+
+    draw();
+    requestAnimationFrame(animateLoop);
+  }
+
+  // Throttle flips à ~FRAME_MS
+  let lastFlip = performance.now();
+  function flipTicker(now) {
+    if (now - lastFlip >= FRAME_MS) {
+      lastFlip = now;
+      for (let r = 0; r < 2; r++) {
+        for (let c = 0; c < cols; c++) {
+          tickFlip(r, c);
+        }
+      }
+    }
+    requestAnimationFrame(flipTicker);
+  }
+
+  // init
+  resizeCanvas();
+  window.addEventListener("resize", resizeCanvas);
+
+  // lance l’animation au chargement
+  runSequence();
+
+  // boucles
+  requestAnimationFrame(animateLoop);
+  requestAnimationFrame(flipTicker);
+})();
+</script>
+</body>
+</html>
