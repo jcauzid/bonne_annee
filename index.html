@@ -44,11 +44,34 @@
 
 <script>
 (() => {
-  // ============================
-  // 1) CONFIG — change tes mots ici
-  // ============================
-  const LINE1 = "GARE";
-  const LINE2 = "PARIS";
+// ============================
+// 1) LISTES DE MOTS (à toi de jouer)
+// ============================
+const WORDS_LINE1 = [
+  "GARE",
+  "TRAIN",
+  "DEPART",
+  "ARRIVEE",
+  "RETARD"
+];
+
+const WORDS_LINE2 = [
+  "PARIS",
+  "NANCY",
+  "METZ",
+  "LYON",
+  "STRASB"
+];
+
+// ============================
+// 2) TIRAGE AU SORT
+// ============================
+function randomChoice(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+const LINE1 = randomChoice(WORDS_LINE1);
+const LINE2 = randomChoice(WORDS_LINE2);
 
   // Alphabet “roue” (adapte si tu veux chiffres, tiret, etc.)
   const ALPHABET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-./";
@@ -61,8 +84,8 @@
   const PAD    = 18;      // marge autour
 
   const FLIP_FRAMES = 10;     // fluidité du flip (plus haut = plus fluide)
-  const FRAME_MS    = 18;     // vitesse des frames du flip
-  const STEP_MS     = 55;     // délai entre deux “pas” de roue (lettre suivante)
+  const FRAME_MS    = 5;     // vitesse des frames du flip
+  const STEP_MS     = 5;     // délai entre deux “pas” de roue (lettre suivante)
 
   // Couleurs
   const BG      = "#0b0b0b";
