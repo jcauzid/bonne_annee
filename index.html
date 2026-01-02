@@ -75,4 +75,238 @@
     const gain = audioCtx.createGain();
     osc.type = "square";
     osc.frequency.setValueAtTime(1800, t);
-    gain.gain.setValueAtTime(0.0001, t)
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.12, t + 0.002);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(t); osc.stop(t + 0.035);
+  }
+  window.addEventListener("pointerdown", ensureAudio, { once:true });
+
+  // ============================
+  // Canvas / DPR
+  // ============================
+  const canvas = document.getElementById("board");
+  const ctx = canvas.getContext("2d");
+  const cols = Math.max(LINE1.length, LINE2.length);
+
+  function dpr() { return Math.max(1, Math.min(2.5, window.devicePixelRatio || 1)); }
+
+  function resizeCanvas() {
+    const w = PAD*2 + cols*CELL_W + (cols-1)*GAP_X;
+    const h = PAD*2 + 2*CELL_H + GAP_Y;
+    const ratio = dpr();
+    canvas.width  = Math.floor(w * ratio);
+    canvas.height = Math.floor(h * ratio);
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    draw();
+  }
+
+  // ============================
+  // Helpers dessin
+  // ============================
+  function roundRect(c, x, y, w, h, r) {
+    const rr = Math.min(r, w/2, h/2);
+    c.beginPath();
+    c.moveTo(x+rr, y);
+    c.arcTo(x+w, y, x+w, y+h, rr);
+    c.arcTo(x+w, y+h, x, y+h, rr);
+    c.arcTo(x, y+h, x, y, rr);
+    c.arcTo(x, y, x+w, y, rr);
+    c.closePath();
+  }
+
+  function drawCellBackground(x, y) {
+    ctx.save();
+    ctx.shadowColor = SHADOW;
+    ctx.shadowBlur = 14;
+    ctx.shadowOffsetY = 8;
+    roundRect(ctx, x, y, CELL_W, CELL_H, 12);
+    ctx.fillStyle = CELL_BG;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    roundRect(ctx, x, y, CELL_W, CELL_H, 12);
+    ctx.strokeStyle = EDGE;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = DIVIDER;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, y + CELL_H/2);
+    ctx.lineTo(x + CELL_W, y + CELL_H/2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawCharHalf(char, x, y, half, clipAmount01) {
+    ctx.save();
+    ctx.font = `700 ${FONT_SIZE}px ${FONT_FAMILY}`;
+    ctx.fillStyle = TEXT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const cx = x + CELL_W/2;
+    const cy = y + CELL_H/2;
+    const hh = CELL_H/2;
+    const topY = y;
+    const botY = y + hh;
+
+    if (half === "top") {
+      const maskH = hh * clipAmount01;
+      ctx.beginPath();
+      ctx.rect(x, topY + maskH, CELL_W, hh - maskH);
+      ctx.clip();
+      ctx.fillText(char, cx, cy + 2);
+    } else {
+      const maskH = hh * clipAmount01;
+      ctx.beginPath();
+      ctx.rect(x, botY, CELL_W, hh - maskH);
+      ctx.clip();
+      ctx.fillText(char, cx, cy + 2);
+    }
+    ctx.restore();
+  }
+
+  // ============================
+  // Modèle / animation
+  // ============================
+  function padToCols(s) { return (s || "").toUpperCase().padEnd(cols, " ").slice(0, cols); }
+  const target1 = padToCols(LINE1);
+  const target2 = padToCols(LINE2);
+
+  const state = Array.from({length:2}, () =>
+    Array.from({length:cols}, () => ({ cur:" ", flipping:false, phase:"idle", frame:0, nextChar:" " }))
+  );
+
+  function nextInAlphabet(ch) {
+    const i = ALPHABET.indexOf(ch);
+    return (i === -1) ? ALPHABET[0] : ALPHABET[(i+1) % ALPHABET.length];
+  }
+  function cellTarget(r,c){ return (r===0 ? target1[c] : target2[c]) || " "; }
+
+  function startFlip(r,c,toChar){
+    const cell = state[r][c];
+    cell.flipping = true;
+    cell.phase = "closingTop";
+    cell.frame = 0;
+    cell.nextChar = toChar;
+  }
+
+  function tickFlip(r,c){
+    const cell = state[r][c];
+    if (!cell.flipping) return;
+    cell.frame++;
+
+    if (cell.phase === "closingTop") {
+      if (cell.frame >= FLIP_FRAMES) {
+        clickSound();
+        cell.cur = cell.nextChar;
+        cell.phase = "openingBottom";
+        cell.frame = 0;
+      }
+    } else if (cell.phase === "openingBottom") {
+      if (cell.frame >= FLIP_FRAMES) {
+        cell.flipping = false;
+        cell.phase = "idle";
+        cell.frame = 0;
+      }
+    }
+  }
+
+  function waitFlipDone(r,c,cb){
+    const check = () => (!state[r][c].flipping) ? cb() : requestAnimationFrame(check);
+    check();
+  }
+
+  function stepWheelForCell(r,c,doneCb){
+    const cell = state[r][c];
+    const tgt = cellTarget(r,c);
+
+    if (cell.cur === tgt) { doneCb(); return; }
+    if (!ALPHABET.includes(tgt)) {
+      startFlip(r,c,tgt);
+      waitFlipDone(r,c,doneCb);
+      return;
+    }
+
+    const next = nextInAlphabet(cell.cur);
+    startFlip(r,c,next);
+    waitFlipDone(r,c,() => setTimeout(() => stepWheelForCell(r,c,doneCb), STEP_MS));
+  }
+
+  let queue = [];
+  let running = false;
+
+  function buildQueue(){
+    queue = [];
+    for (let r=0;r<2;r++) for (let c=0;c<cols;c++) queue.push([r,c]);
+  }
+
+  function runSequence(){
+    if (running) return;
+    running = true;
+    buildQueue();
+
+    const nextCell = () => {
+      const item = queue.shift();
+      if (!item) { running = false; return; }
+      const [r,c] = item;
+      stepWheelForCell(r,c,nextCell);
+    };
+    nextCell();
+  }
+
+  // ============================
+  // Rendu
+  // ============================
+  function draw() {
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let r=0;r<2;r++){
+      for (let c=0;c<cols;c++){
+        const x = PAD + c*(CELL_W + GAP_X);
+        const y = PAD + r*(CELL_H + GAP_Y);
+        drawCellBackground(x,y);
+
+        const cell = state[r][c];
+        let topClip = 0, botClip = 0;
+
+        if (cell.flipping && cell.phase === "closingTop") {
+          topClip = Math.min(1, cell.frame / FLIP_FRAMES);
+        } else if (cell.flipping && cell.phase === "openingBottom") {
+          const p = Math.min(1, cell.frame / FLIP_FRAMES);
+          botClip = 1 - p;
+        }
+
+        drawCharHalf(cell.cur, x, y, "top", topClip);
+        drawCharHalf(cell.cur, x, y, "bottom", botClip);
+      }
+    }
+  }
+
+  // Tick flips à ~FRAME_MS
+  let lastFlip = performance.now();
+  function flipTicker(now){
+    if (now - lastFlip >= FRAME_MS) {
+      lastFlip = now;
+      for (let r=0;r<2;r++) for (let c=0;c<cols;c++) tickFlip(r,c);
+    }
+    draw();
+    requestAnimationFrame(flipTicker);
+  }
+
+  // Init
+  resizeCanvas();
+  window.addEventListener("resize", resizeCanvas);
+  runSequence();
+  requestAnimationFrame(flipTicker);
+})();
+</script>
+</body>
+</html>
